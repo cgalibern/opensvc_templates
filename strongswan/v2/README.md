@@ -132,7 +132,7 @@ user@node1:~$ ip route show | grep ^10.101
 Create the pre-shared key:
 ```
 $ sudo om system/sec/strongswan create
-$ sudo om system/sec/strongswan key add --name psk --value "$(openssl rand -base64 32)"
+$ openssl rand -base64 32 | sudo om system/sec/strongswan key add psk --from /dev/stdin
 ```
 
 Store the strongSwan configuration, the same for every node:
@@ -191,7 +191,7 @@ user@node1:~$ sudo docker exec system..strongswan.container.swanctl swanctl --li
 ### Rotate the pre-shared key
 
 ```
-$ sudo om system/sec/strongswan key change --name psk --value "$(openssl rand -base64 32)"
+$ openssl rand -base64 32 | sudo om system/sec/strongswan key change psk --from /dev/stdin
 ```
 
 Every node renders the configuration again with the new key, and strongSwan
