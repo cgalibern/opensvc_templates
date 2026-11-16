@@ -39,7 +39,9 @@ To deploy and test the VPN mesh solution, the following components must be avail
 * OpenSVC Agent: v3.0.0-rc47 or later, installed and operational on all nodes.
 * Container Runtime: Docker or Podman, to run strongSwan and the test applications.
 * StrongSwan/IPsec: The mberner/strongswan container image must be accessible. Any image with strongSwan's `charon` and `swanctl` does.
-* Backend Network: a `routed_bridge` network carrying the traffic between the nodes in tunnels, `ipip` for an ipv4 network or `ip6ip6` for an ipv6 one, the default tunnel modes.
+* Backend Network: a `routed_bridge` network carrying the traffic between the nodes in tunnels, in any tunnel mode: `ipip`, `ip6ip6` or `gre`.
+* No other IKE daemon on the nodes: strongSwan runs in the host network namespace and needs the udp ports `500` and `4500`. A `strongswan-starter` (or `strongswan`, `ipsec`) service of the host holds them, see [Common issues](#strongswan-sends-nothing-no-socket-implementation-registered).
+* IPv6 forwarding, for an ipv6 backend network: `net.ipv6.conf.all.forwarding = 1` on every node. Docker enables the ipv4 forwarding, not the ipv6 one.
 
 ## How it works
 
@@ -121,7 +123,10 @@ subnet@node2 = 10.101.1.0/24
 subnet@node3 = 10.101.2.0/24
 ```
 
-The subnets of the other nodes are routed through `otun*` tunnel devices:
+The subnets of the other nodes are routed through tunnel devices, named
+`tun<peer ipv4 address digits>` for an ipv4 tunnel and `otun<hash>` for an ipv6
+one. The networks tunneling between the same node addresses share these
+devices:
 
 ```
 user@node1:~$ ip route show | grep ^10.101
@@ -143,9 +148,15 @@ $ sudo om system/cfg/strongswan key add --name strongswan.conf --from https://ra
 ```
 
 `swanctl.conf` is a template: it ranges over the tunnels of the node, and reads
-the pre-shared key from `system/sec/strongswan`. It selects the `ipip` and
-`ip6ip6` tunnel traffic, the protocols `4` and `41`: with
-`network#backendnet.tunnel_mode=gre`, select `47` instead.
+the pre-shared key from `system/sec/strongswan`. It selects the tunnel traffic
+of every tunnel mode, the protocols `4` (`ipip`, and ipv4 in ipv6), `41`
+(`ip6ip6`, and ipv6 in ipv4) and `47` (`gre`), so a change of tunnel mode does
+not leave the traffic unencrypted.
+
+Dead peer detection (`dpd_delay`, `dpd_action = trap`) drops the security
+associations of a peer that stopped answering, a rebooted node for example,
+and negotiates new ones on the next packet, instead of sending into the old
+ones until they expire.
 
 Deploy the strongswan service:
 ```
@@ -163,8 +174,10 @@ system/svc/strongswan  node3  up
 ```
 
 Each node renders its own peers: on node1, the rendered configuration has a
-connection named `node2` and one named `node3`, with the tunnel endpoints as
-their addresses.
+connection per tunnel, named after the peer node and the tunnel device, for
+example `node2-tun1045012` and `node3-tun1045013`, with the tunnel endpoints
+as their addresses. A node with an ipv4 and an ipv6 backend network has two
+connections per peer.
 
 ```
 user@node1:~$ sudo cat /srv/strongswan.system.svc.<clustername>/swanctl.conf
@@ -177,6 +190,21 @@ user@node1:~$ sudo om system/svc/strongswan schedule list
 OBJECT                 NODE   ACTION  KEY                     ...  ON                      PACE
 system/svc/strongswan  node1  run     task#load_all.schedule  ...  FileInstalled,rid=fs#1  @10s
 system/svc/strongswan  node1  run     task#refresh.schedule   ...  NetworkPeersUpdated     @30s backoff @1m
+```
+
+strongSwan must have loaded one connection per tunnel of the node: the two
+counts are equal.
+
+```
+user@node1:~$ sudo docker exec system..strongswan.container.swanctl swanctl --list-conns | grep -c IKEv2
+user@node1:~$ ip -br link | grep -cE '^o?tun[0-9a-f]+@'
+```
+
+The kernel holds an IPsec policy for each tunnel's endpoints, before any
+traffic:
+
+```
+user@node1:~$ sudo ip xfrm policy | grep '^src'
 ```
 
 The connections are negotiated on the first packet a tunnel carries. Once some
@@ -285,9 +313,20 @@ $ sudo tcpdump -i br-prd ip proto 4
 $ sudo tcpdump -i br-prd ip6 proto 41
 ```
 
-If the tunnel packets are seen unencrypted, check the connections strongSwan
-loaded (`swanctl --list-conns` in the container), the rendered
-`swanctl.conf`, and the `task#load_all` runs in `om system/svc/strongswan logs`.
+If the tunnel packets are seen unencrypted, no IPsec policy covers the tunnel
+endpoints (`ip xfrm policy`). Check the connections strongSwan loaded
+(`swanctl --list-conns` in the container) against the tunnels of the node, the
+rendered `swanctl.conf`, and the `task#load_all` runs in
+`om system/svc/strongswan logs`.
+
+A `swanctl.conf` stored from an earlier version of this template names its
+connections after the peer node only: a node with ipv4 and ipv6 tunnels to the
+same peer loads one of the two connections, and the other tunnel goes out in
+clear. Store the current template again:
+
+```
+$ sudo om system/cfg/strongswan key change --name swanctl.conf --from https://raw.githubusercontent.com/opensvc/opensvc_templates/main/strongswan/v2/swanctl.conf
+```
 
 #### All packets are lost (100% packet loss)
 
@@ -295,10 +334,38 @@ loaded (`swanctl --list-conns` in the container), the rendered
 - The tunnels and IKE need the protocols `4` or `41`, and `50` (ESP), and the udp ports `500` and `4500`, allowed between the nodes.
 - With IPv6, check ip6 firewall tables.
 
+- With IPv6, check `net.ipv6.conf.all.forwarding` is `1` on every node: the
+  packets of a container reach the bridge of the node and go no further.
+- The routes to the subnets of the other nodes must go through the tunnels
+  (`ip route`). A change of the tunnel mode of a network recreates the tunnel
+  devices, and the kernel drops the routes of the other networks sharing them:
+  `sudo om network setup` adds them again.
+
 The DROP forward policy is a very common blocker.
 ```
 $ sudo ip6tables -L
 ...
 Chain FORWARD (policy DROP)
 ...
+```
+
+#### strongSwan sends nothing: "no socket implementation registered"
+
+The container log shows, at its start:
+
+```
+[NET] unable to bind socket: Address already in use
+[NET] could not create any sockets
+```
+
+then, for every IKE packet, `no socket implementation registered, sending
+failed`, and the peers seem not to answer. Another IKE daemon holds the udp
+ports `500` and `4500` of the node, often the strongSwan service of the host
+distribution:
+
+```
+$ sudo ss -lunp 'sport = :500 or sport = :4500'
+$ sudo systemctl disable --now strongswan-starter
+$ sudo systemctl mask strongswan-starter
+$ sudo om system/svc/strongswan restart --wait
 ```
