@@ -281,14 +281,25 @@ pod3      node3   ip#1  10.101.2.142                 backendnet   routed_bridge
 
 **For each pair of nodes :**
 
-On the receiver node (node2), use tcpdump to see the ESP network traffic:
-```
-# ipv4
-$ sudo tcpdump -i br-prd esp
+On the receiver node (node2), use tcpdump to see the frames the tunnels carry
+between the nodes, over ipv4 and over ipv6: the tunnel protocols `4` (ipip),
+`41` (ip6ip6), `47` (gre), ESP (`50`), and IKE (udp `500` and `4500`).
 
-# ipv6
-$ sudo tcpdump -i br-prd ip6 and esp
 ```
+$ sudo tcpdump -ni br-prd '
+    (ip and (ip[9] = 4 or ip[9] = 41 or ip[9] = 47 or ip[9] = 50
+             or udp port 500 or udp port 4500))
+    or (ip6 and (ip6[6] = 4 or ip6[6] = 41 or ip6[6] = 47 or ip6[6] = 50
+                 or (ip6[6] = 60 and (ip6[40] = 4 or ip6[40] = 41
+                                      or ip6[40] = 47 or ip6[40] = 50))
+                 or udp port 500 or udp port 4500))'
+```
+
+All of them must be ESP, or IKE. An ipv6 tunnel adds a destination options
+header, the tunnel encapsulation limit, before the ESP header: `ip6 proto 50`
+and `ip6 and esp` miss its frames, hence the `ip6[6] = 60` case. `ip6
+protochain 50` matches them too, but the kernel does not accept it, and
+tcpdump falls back to filtering the frames itself.
 
 On the other node (node1):
 
@@ -304,14 +315,10 @@ nsenter `...` ping6 ...
 
 #### Packets are transmitted and received (0% packet loss)
 
-Check if the packets are transmitted as plain tunnel traffic instead of ESP:
-```
-# ipv4 (ipip)
-$ sudo tcpdump -i br-prd ip proto 4
-
-# ipv6 (ip6ip6)
-$ sudo tcpdump -i br-prd ip6 proto 41
-```
+Check if the packets are transmitted as plain tunnel traffic instead of ESP,
+with the tcpdump command of the test above: an unencrypted frame shows the
+inner packet, `IP 10.45.0.11 > 10.45.0.12: IP 10.101.0.14 > 10.101.1.79: ICMP
+echo request`, an encrypted one shows `ESP(spi=…)`.
 
 If the tunnel packets are seen unencrypted, no IPsec policy covers the tunnel
 endpoints (`ip xfrm policy`). Check the connections strongSwan loaded
