@@ -143,8 +143,8 @@ $ openssl rand -base64 32 | sudo om system/sec/strongswan key add psk --from /de
 Store the strongSwan configuration, the same for every node:
 ```
 $ sudo om system/cfg/strongswan create
-$ sudo om system/cfg/strongswan key add --name swanctl.conf --from https://raw.githubusercontent.com/opensvc/opensvc_templates/main/strongswan/v2/swanctl.conf
-$ sudo om system/cfg/strongswan key add --name strongswan.conf --from https://raw.githubusercontent.com/opensvc/opensvc_templates/main/strongswan/v2/strongswan.conf
+$ sudo om system/cfg/strongswan key add swanctl.conf --from https://raw.githubusercontent.com/opensvc/opensvc_templates/main/strongswan/v2/swanctl.conf
+$ sudo om system/cfg/strongswan key add strongswan.conf --from https://raw.githubusercontent.com/opensvc/opensvc_templates/main/strongswan/v2/strongswan.conf
 ```
 
 `swanctl.conf` is a template: it ranges over the tunnels of the node, and reads
@@ -325,7 +325,7 @@ same peer loads one of the two connections, and the other tunnel goes out in
 clear. Store the current template again:
 
 ```
-$ sudo om system/cfg/strongswan key change --name swanctl.conf --from https://raw.githubusercontent.com/opensvc/opensvc_templates/main/strongswan/v2/swanctl.conf
+$ sudo om system/cfg/strongswan key change swanctl.conf --from https://raw.githubusercontent.com/opensvc/opensvc_templates/main/strongswan/v2/swanctl.conf
 ```
 
 #### All packets are lost (100% packet loss)
